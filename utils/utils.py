@@ -12,7 +12,6 @@ import torch
 import webcolors
 from torch import nn
 from torch.nn.init import _calculate_fan_in_and_fan_out, _no_grad_normal_
-from torchvision.ops.boxes import batched_nms
 
 from utils.sync_batchnorm import SynchronizedBatchNorm2d
 
@@ -85,6 +84,78 @@ def preprocess_video(*frame_from_video, max_size=512, mean=(0.406, 0.456, 0.485)
     framed_metas = [img_meta[1:] for img_meta in imgs_meta]
 
     return ori_imgs, framed_imgs, framed_metas
+
+# from https://github.com/ponta256/fssd-resnext-voc-coco/blob/master/layers/box_utils.py#L245
+# With torch.vision's implementation, it would overflow.
+# For more detail, please see https://github.com/zylo117/Yet-Another-EfficientDet-Pytorch/issues/225
+def nms(boxes, scores, nms_thresh=0.5, top_k=200):
+    boxes = boxes.cpu().numpy()
+    scores = scores.cpu().numpy()
+    keep = []
+    if len(boxes) == 0:
+        return keep
+    x1 = boxes[:, 0]
+    y1 = boxes[:, 1]
+    x2 = boxes[:, 2]
+    y2 = boxes[:, 3]
+    area = (x2-x1)*(y2-y1)
+    idx = np.argsort(scores, axis=0)   # sort in ascending order
+    idx = idx[-top_k:]  # indices of the top-k largest vals
+
+    count = 0
+    while len(idx) > 0:
+        last = len(idx)-1
+        i = idx[last]  # index of current largest val
+        keep.append(i)
+        count += 1
+        xx1 = np.maximum(x1[i], x1[idx[:last]])
+        yy1 = np.maximum(y1[i], y1[idx[:last]])
+        xx2 = np.minimum(x2[i], x2[idx[:last]])
+        yy2 = np.minimum(y2[i], y2[idx[:last]])
+
+        w = np.maximum(0, xx2-xx1)
+        h = np.maximum(0, yy2-yy1)
+
+        inter = w*h
+        iou = inter / (area[idx[:last]]+area[i]-inter)
+        idx = np.delete(idx, np.concatenate(([last], np.where(iou > nms_thresh)[0])))
+
+    return np.array(keep, dtype=np.int64), count
+
+# from https://github.com/pytorch/vision/blob/master/torchvision/ops/boxes.py#L39
+def batched_nms(
+    boxes,
+    scores,
+    idxs,
+    iou_threshold,
+):
+    """
+    Performs non-maximum suppression in a batched fashion.
+    Each index value correspond to a category, and NMS
+    will not be applied between elements of different categories.
+    Args:
+        boxes (Tensor[N, 4]): boxes where NMS will be performed. They
+            are expected to be in (x1, y1, x2, y2) format
+        scores (Tensor[N]): scores for each one of the boxes
+        idxs (Tensor[N]): indices of the categories for each one of the boxes.
+        iou_threshold (float): discards all overlapping boxes with IoU > iou_threshold
+    Returns:
+        keep (Tensor): int64 tensor with the indices of
+            the elements that have been kept by NMS, sorted
+            in decreasing order of scores
+    """
+    if boxes.numel() == 0:
+        return torch.empty((0,), dtype=torch.int64, device=boxes.device)
+    # strategy: in order to perform NMS independently per class.
+    # we add an offset to all the boxes. The offset is dependent
+    # only on the class idx, and is large enough so that boxes
+    # from different classes do not overlap
+    else:
+        max_coordinate = boxes.max()
+        offsets = idxs.to(boxes) * (max_coordinate + torch.tensor(1).to(boxes))
+        boxes_for_nms = boxes + offsets[:, None]
+        keep, _ = nms(boxes_for_nms, scores, nms_thresh=iou_threshold)
+        return keep
 
 
 def postprocess(x, anchors, regression, classification, regressBoxes, clipBoxes, threshold, iou_threshold):

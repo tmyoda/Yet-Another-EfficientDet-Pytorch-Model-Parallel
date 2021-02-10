@@ -26,13 +26,14 @@ class MBConvBlock(nn.Module):
         has_se (bool): Whether the block contains a Squeeze and Excitation layer.
     """
 
-    def __init__(self, block_args, global_params):
+    def __init__(self, block_args, global_params, gpu_id=None):
         super().__init__()
         self._block_args = block_args
         self._bn_mom = 1 - global_params.batch_norm_momentum
         self._bn_eps = global_params.batch_norm_epsilon
         self.has_se = (self._block_args.se_ratio is not None) and (0 < self._block_args.se_ratio <= 1)
         self.id_skip = block_args.id_skip  # skip connection and drop connect
+        self.gpu_id = gpu_id
 
         # Get static or dynamic convolution depending on image size
         Conv2d = get_same_padding_conv2d(image_size=global_params.image_size)
@@ -41,7 +42,7 @@ class MBConvBlock(nn.Module):
         inp = self._block_args.input_filters  # number of input channels
         oup = self._block_args.input_filters * self._block_args.expand_ratio  # number of output channels
         if self._block_args.expand_ratio != 1:
-            self._expand_conv = Conv2d(in_channels=inp, out_channels=oup, kernel_size=1, bias=False)
+            self._expand_conv = Conv2d(in_channels=inp, out_channels=oup, kernel_size=1, bias=False, gpu_id=self.gpu_id)
             self._bn0 = nn.BatchNorm2d(num_features=oup, momentum=self._bn_mom, eps=self._bn_eps)
 
         # Depthwise convolution phase
@@ -49,18 +50,17 @@ class MBConvBlock(nn.Module):
         s = self._block_args.stride
         self._depthwise_conv = Conv2d(
             in_channels=oup, out_channels=oup, groups=oup,  # groups makes it depthwise
-            kernel_size=k, stride=s, bias=False)
+            kernel_size=k, stride=s, bias=False, gpu_id=self.gpu_id)
         self._bn1 = nn.BatchNorm2d(num_features=oup, momentum=self._bn_mom, eps=self._bn_eps)
-
         # Squeeze and Excitation layer, if desired
         if self.has_se:
             num_squeezed_channels = max(1, int(self._block_args.input_filters * self._block_args.se_ratio))
-            self._se_reduce = Conv2d(in_channels=oup, out_channels=num_squeezed_channels, kernel_size=1)
-            self._se_expand = Conv2d(in_channels=num_squeezed_channels, out_channels=oup, kernel_size=1)
+            self._se_reduce = Conv2d(in_channels=oup, out_channels=num_squeezed_channels, kernel_size=1, gpu_id=self.gpu_id)
+            self._se_expand = Conv2d(in_channels=num_squeezed_channels, out_channels=oup, kernel_size=1, gpu_id=self.gpu_id)
 
         # Output phase
         final_oup = self._block_args.output_filters
-        self._project_conv = Conv2d(in_channels=oup, out_channels=final_oup, kernel_size=1, bias=False)
+        self._project_conv = Conv2d(in_channels=oup, out_channels=final_oup, kernel_size=1, bias=False, gpu_id=self.gpu_id)
         self._bn2 = nn.BatchNorm2d(num_features=final_oup, momentum=self._bn_mom, eps=self._bn_eps)
         self._swish = MemoryEfficientSwish()
 
@@ -70,6 +70,13 @@ class MBConvBlock(nn.Module):
         :param drop_connect_rate: drop connect rate (float, between 0 and 1)
         :return: output of block
         """
+
+        if self.gpu_id is not None:
+            inputs = inputs.to(f'cuda:{self.gpu_id}')
+            if self._block_args.expand_ratio != 1:
+                self._bn0 = self._bn0.to(f'cuda:{self.gpu_id}')
+            self._bn1 = self._bn1.to(f'cuda:{self.gpu_id}')
+            self._bn2 = self._bn2.to(f'cuda:{self.gpu_id}')
 
         # Expansion and Depthwise Convolution
         x = inputs
@@ -119,13 +126,23 @@ class EfficientNet(nn.Module):
 
     """
 
-    def __init__(self, blocks_args=None, global_params=None):
+    def __init__(self, blocks_args=None, global_params=None, parallel_gpus=None):
+        gpu_idx = 0
+        def get_gpu_id():
+            nonlocal gpu_idx
+            if parallel_gpus is not None:
+                gpu_id = parallel_gpus[gpu_idx % len(parallel_gpus)]
+                gpu_idx += 1
+                return gpu_id
+            else:
+                return None
+
         super().__init__()
         assert isinstance(blocks_args, list), 'blocks_args should be a list'
         assert len(blocks_args) > 0, 'block args must be greater than 0'
         self._global_params = global_params
         self._blocks_args = blocks_args
-
+                
         # Get static or dynamic convolution depending on image size
         Conv2d = get_same_padding_conv2d(image_size=global_params.image_size)
 
@@ -142,7 +159,7 @@ class EfficientNet(nn.Module):
         # Build blocks
         self._blocks = nn.ModuleList([])
         for block_args in self._blocks_args:
-
+            
             # Update block input and output filters based on depth multiplier.
             block_args = block_args._replace(
                 input_filters=round_filters(block_args.input_filters, self._global_params),
@@ -151,12 +168,12 @@ class EfficientNet(nn.Module):
             )
 
             # The first block needs to take care of stride and filter size increase.
-            self._blocks.append(MBConvBlock(block_args, self._global_params))
+            self._blocks.append(MBConvBlock(block_args, self._global_params, get_gpu_id()))
             if block_args.num_repeat > 1:
                 block_args = block_args._replace(input_filters=block_args.output_filters, stride=1)
             for _ in range(block_args.num_repeat - 1):
-                self._blocks.append(MBConvBlock(block_args, self._global_params))
-
+                self._blocks.append(MBConvBlock(block_args, self._global_params, get_gpu_id()))
+            
         # Head
         in_channels = block_args.output_filters  # output of final block
         out_channels = round_filters(1280, self._global_params)
@@ -207,18 +224,18 @@ class EfficientNet(nn.Module):
         return x
 
     @classmethod
-    def from_name(cls, model_name, override_params=None):
+    def from_name(cls, model_name, override_params=None, parallel_gpus=None):
         cls._check_model_name_is_valid(model_name)
         blocks_args, global_params = get_model_params(model_name, override_params)
-        return cls(blocks_args, global_params)
+        return cls(blocks_args, global_params, parallel_gpus)
 
     @classmethod
-    def from_pretrained(cls, model_name, load_weights=True, advprop=False, num_classes=1000, in_channels=3):
-        model = cls.from_name(model_name, override_params={'num_classes': num_classes})
+    def from_pretrained(cls, model_name, load_weights=True, advprop=False, num_classes=1000, in_channels=3, parallel_gpus=None):
+        model = cls.from_name(model_name, override_params={'num_classes': num_classes}, parallel_gpus=parallel_gpus)
         if load_weights:
             load_pretrained_weights(model, model_name, load_fc=(num_classes == 1000), advprop=advprop)
         if in_channels != 3:
-            Conv2d = get_same_padding_conv2d(image_size = model._global_params.image_size)
+            Conv2d = get_same_padding_conv2d(image_size=model._global_params.image_size)
             out_channels = round_filters(32, model._global_params)
             model._conv_stem = Conv2d(in_channels, out_channels, kernel_size=3, stride=2, bias=False)
         return model

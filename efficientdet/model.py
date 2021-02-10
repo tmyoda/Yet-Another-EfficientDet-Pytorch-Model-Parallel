@@ -422,15 +422,16 @@ class EfficientNet(nn.Module):
     modified by Zylo117
     """
 
-    def __init__(self, compound_coef, load_weights=False):
+    def __init__(self, compound_coef, load_weights=False, parallel_gpus=None):
         super(EfficientNet, self).__init__()
-        model = EffNet.from_pretrained(f'efficientnet-b{compound_coef}', load_weights)
+        model = EffNet.from_pretrained(f'efficientnet-b{compound_coef}', load_weights, parallel_gpus=parallel_gpus)
         del model._conv_head
         del model._bn1
         del model._avg_pooling
         del model._dropout
         del model._fc
         self.model = model
+        self.use_model_parallel = parallel_gpus is not None
 
     def forward(self, x):
         x = self.model._conv_stem(x)
@@ -454,7 +455,10 @@ class EfficientNet(nn.Module):
                 feature_maps.append(x)
             last_x = x
         del last_x
-        return feature_maps[1:]
+        if self.use_model_parallel:
+            return [x.to('cuda:0') for x in feature_maps[1:]]
+        else:
+            return feature_maps[1:]
 
 
 if __name__ == '__main__':

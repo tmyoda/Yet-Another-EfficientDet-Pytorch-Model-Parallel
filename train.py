@@ -59,7 +59,7 @@ def get_args():
     parser.add_argument('--debug', type=boolean_string, default=False,
                         help='whether visualize the predicted boxes of training, '
                              'the output images will be in test/')
-
+    parser.add_argument('--model_parallel', action='store_true', help='Use single-machine model parallel. 2 or more GPUs are required.')
     args = parser.parse_args()
     return args
 
@@ -84,8 +84,12 @@ class ModelWithLoss(nn.Module):
 def train(opt):
     params = Params(f'projects/{opt.project}.yml')
 
+    parallel_gpus = None
     if params.num_gpus == 0:
         os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
+    elif opt.model_parallel:
+        parallel_gpus = [i for i in range(1, params.num_gpus)]
+        params.num_gpus = 1
 
     if torch.cuda.is_available():
         torch.cuda.manual_seed(42)
@@ -122,7 +126,7 @@ def train(opt):
     val_generator = DataLoader(val_set, **val_params)
 
     model = EfficientDetBackbone(num_classes=len(params.obj_list), compound_coef=opt.compound_coef,
-                                 ratios=eval(params.anchors_ratios), scales=eval(params.anchors_scales))
+                                 ratios=eval(params.anchors_ratios), scales=eval(params.anchors_scales), parallel_gpus=parallel_gpus)
 
     # load last weights
     if opt.load_weights is not None:
@@ -300,7 +304,7 @@ def train(opt):
                     best_loss = loss
                     best_epoch = epoch
 
-                    save_checkpoint(model, f'efficientdet-d{opt.compound_coef}_{epoch}_{step}.pth')
+                    save_checkpoint(model, f'efficientdet-d{opt.compound_coef}_best.pth')
 
                 model.train()
 

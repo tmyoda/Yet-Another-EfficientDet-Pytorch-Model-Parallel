@@ -106,9 +106,11 @@ def get_same_padding_conv2d(image_size=None):
 class Conv2dDynamicSamePadding(nn.Conv2d):
     """ 2D Convolutions like TensorFlow, for a dynamic image size """
 
-    def __init__(self, in_channels, out_channels, kernel_size, stride=1, dilation=1, groups=1, bias=True):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, dilation=1, groups=1, bias=True, gpu_id=None):
         super().__init__(in_channels, out_channels, kernel_size, stride, 0, dilation, groups, bias)
         self.stride = self.stride if len(self.stride) == 2 else [self.stride[0]] * 2
+        if gpu_id is not None:
+            self.weight = self.weight.to(f'cuda:{gpu_id}')
 
     def forward(self, x):
         ih, iw = x.size()[-2:]

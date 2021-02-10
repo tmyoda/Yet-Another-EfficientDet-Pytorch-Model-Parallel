@@ -12,10 +12,12 @@ class Conv2dStaticSamePadding(nn.Module):
     The real keras/tensorflow conv2d with same padding
     """
 
-    def __init__(self, in_channels, out_channels, kernel_size, stride=1, bias=True, groups=1, dilation=1, **kwargs):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, bias=True, groups=1, dilation=1, gpu_id=None, **kwargs):
         super().__init__()
+        self.gpu_id = gpu_id
+        
         self.conv = nn.Conv2d(in_channels, out_channels, kernel_size, stride=stride,
-                              bias=bias, groups=groups)
+                            bias=bias, groups=groups)
         self.stride = self.conv.stride
         self.kernel_size = self.conv.kernel_size
         self.dilation = self.conv.dilation
@@ -42,7 +44,8 @@ class Conv2dStaticSamePadding(nn.Module):
         bottom = extra_v - top
 
         x = F.pad(x, [left, right, top, bottom])
-
+        if self.gpu_id is not None:
+            self.conv = self.conv.to(f'cuda:{self.gpu_id}')
         x = self.conv(x)
         return x
 
