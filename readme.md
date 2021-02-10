@@ -1,3 +1,16 @@
+# This Repo is forked from https://github.com/zylo117/Yet-Another-EfficientDet-Pytorch
+I have implemented the model single-machine model parallel.
+2 or more GPUs are required.
+
+I have confirmed that it can train d8 batch 1 with 12GB VRAM x4.
+
+- Usage
+  - Specify two or more GPUs in project/your_project_name.yaml
+  - Just add the argument `--model_parallel`
+- Example(with pretrained weights, d8)
+```
+python train.py -c 8 -p your_project_name --batch_size 1 --load_weights weights/efficientdet-d8.pth  --num_epochs 10 --model_parallel
+```
 # Yet Another EfficientDet Pytorch
 
 The pytorch re-implement of the official [EfficientDet](https://github.com/google/automl/tree/master/efficientdet) with SOTA performance in real time, original paper link: <https://arxiv.org/abs/1911.09070>
